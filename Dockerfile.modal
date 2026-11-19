@@ -1,0 +1,43 @@
+# Separate Modal image for the LTX IC-LoRA worker.
+# The RunPod Dockerfile remains unchanged and continues to build the RunPod image.
+FROM nvidia/cuda:13.2.0-cudnn-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    LTX_MODELS_DIR=/models \
+    LTX_OUTPUTS_DIR=/tmp/ltx-outputs \
+    HF_HOME=/models/huggingface \
+    HF_HUB_CACHE=/models/huggingface/hub
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git \
+      python3.12 \
+      python3.12-venv \
+      ffmpeg \
+      libgl1 \
+      libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /app
+
+# Keep the same matched PyTorch/CUDA wheel set as the established worker image.
+RUN python -m pip install --upgrade pip \
+    && python -m pip install \
+      --index-url https://download.pytorch.org/whl/cu130 \
+      torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0
+
+ARG LTX2_GIT_REF=main
+RUN git clone --depth 1 --branch "${LTX2_GIT_REF}" \
+      https://github.com/Lightricks/LTX-2.git /opt/LTX-2 \
+    && python -m pip install \
+      -e /opt/LTX-2/packages/ltx-core \
+      -e /opt/LTX-2/packages/ltx-pipelines \
+      boto3 huggingface_hub safetensors tqdm pillow av numpy fastapi python-multipart
+
+ENV LTX2_REPO_DIR=/opt/LTX-2
+
+COPY run_inpaint.py setup_and_download.py ./
