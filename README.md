@@ -137,13 +137,16 @@ python run_inpaint.py --tile
 
 ## Mask Format
 
-- **Same frame count** as source video; output uses the LTX canvas resolution
-- **Grayscale** video (or can be black & white)
+- **Grayscale** video (or black and white)
+- **Frame count** matches the source, or is one frame for a static mask
+- Output uses the LTX canvas resolution
 - **White (255)** = area to **INPAINT** (remove/modify), such as a logo
 - **Black (0)** = area to **PRESERVE**
 - Can be generated using SAM2, After Effects, or any rotoscoping tool
 
 Mask polarity is preserved: white marks the area to remove and black marks the area to preserve. The runner applies the same centered crop to the source and mask, paints the white area LTX green in a temporary reference video, runs IC-LoRA, then Laplacian-pyramid blends through the aligned mask. Pixels outside the mask come from the transformed source clip. The source audio is retained.
+
+Single-frame masks are reused for every source frame during reference generation and final blending.
 
 The script keeps the ComfyUI workflow's two-stage LTX generation and Laplacian blending, while choosing a close-aspect canvas divisible by 64 with neither dimension smaller than the source. For a 720x1280 source, this produces a 768x1344 output. It applies a matching centered aspect crop to the green-mask reference, source, and mask before generation and final blending, keeping them pixel-aligned without stretching. `--skip-stage-2` generates an intermediate at half canvas size. `--low-vram` keeps both stages enabled and reduces memory use with offloading, tiling, and the convolutional VAE.
 

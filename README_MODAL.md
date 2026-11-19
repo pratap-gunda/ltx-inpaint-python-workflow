@@ -121,6 +121,11 @@ that function charges the wallet/bundle and asks Modal to start the job. The
 permanent Modal service token stays server-side, and the uploaded media never
 passes through Firebase Storage.
 
+For static PNG masks, the Modal worker writes a one-frame MP4 at the source
+video's resolution and frame rate. The inpainting preprocessor and final blend
+reuse that frame for every source frame, avoiding a full-length repeated mask
+video.
+
 For this route, Modal's `WEB_UPLOAD_TOKEN` and Firebase's
 `MODAL_OBJECT_REMOVER_TOKEN` must have the same value; the existing backend
 Modal API calls already depend on that shared credential. The

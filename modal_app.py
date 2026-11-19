@@ -17,6 +17,7 @@ import sys
 import shutil
 import secrets
 import uuid
+import time
 from fractions import Fraction
 from urllib.parse import urlparse
 from urllib.request import Request as URLRequest, urlopen
@@ -110,52 +111,56 @@ def _ensure_models() -> None:
 
 
 def _render_static_mask_video(source_path: Path, png_path: Path, output_path: Path) -> tuple[int, int, int, float]:
-    """Repeat a static white-replace/black-preserve PNG for every source frame."""
+    """Encode a static white-replace/black-preserve PNG as a one-frame MP4."""
     import av
     from PIL import Image
 
     source = av.open(str(source_path))
     encoder = None
-    frame_count = 0
     completed = False
     try:
         source_stream = source.streams.video[0]
         fps = source_stream.average_rate or Fraction(24, 1)
         if float(fps) <= 0:
             fps = Fraction(24, 1)
-        if source_stream.width < 64 or source_stream.height < 64 or source_stream.width * source_stream.height > 40_000_000:
+        width, height = source_stream.width, source_stream.height
+        if width < 64 or height < 64 or width * height > 40_000_000:
             raise ValueError("Video dimensions are outside the supported range.")
-        max_frames = int(float(fps) * 60) + 2
+        source_frames = int(source_stream.frames or 0)
+        duration_seconds = None
+        if source_stream.duration and source_stream.time_base:
+            duration_seconds = float(source_stream.duration * source_stream.time_base)
+        elif source.duration:
+            duration_seconds = float(source.duration / av.time_base)
+        if source_frames <= 0 and duration_seconds:
+            source_frames = round(duration_seconds * float(fps))
+        if (duration_seconds is not None and duration_seconds > 60) or source_frames > int(float(fps) * 60) + 2:
+            raise ValueError("Videos longer than 60 seconds are not supported.")
+
         with Image.open(png_path) as opened_mask:
             mask = opened_mask.convert("L")
-        if mask.size != (source_stream.width, source_stream.height):
+        if mask.size != (width, height):
             raise ValueError(
                 f"Mask dimensions {mask.width}x{mask.height} do not match video "
-                f"{source_stream.width}x{source_stream.height}."
+                f"{width}x{height}."
             )
         mask = mask.point(lambda value: 255 if value >= 128 else 0).convert("RGB")
         output_path.unlink(missing_ok=True)
         encoder = av.open(str(output_path), mode="w")
         mask_stream = encoder.add_stream("libx264", rate=fps)
-        mask_stream.width = source_stream.width
-        mask_stream.height = source_stream.height
-        mask_stream.pix_fmt = "yuv420p" if source_stream.width % 2 == 0 and source_stream.height % 2 == 0 else "yuv444p"
+        mask_stream.width = width
+        mask_stream.height = height
+        mask_stream.pix_fmt = "yuv420p" if width % 2 == 0 and height % 2 == 0 else "yuv444p"
         mask_stream.options = {"crf": "0", "preset": "ultrafast"}
-        for _ in source.decode(video=0):
-            if frame_count >= max_frames:
-                raise ValueError("Videos longer than 60 seconds are not supported.")
-            frame = av.VideoFrame.from_image(mask).reformat(format=mask_stream.pix_fmt)
-            frame.pts = frame_count
-            frame.time_base = Fraction(fps.denominator, fps.numerator)
-            for packet in mask_stream.encode(frame):
-                encoder.mux(packet)
-            frame_count += 1
+        frame = av.VideoFrame.from_image(mask).reformat(format=mask_stream.pix_fmt)
+        frame.pts = 0
+        frame.time_base = Fraction(fps.denominator, fps.numerator)
+        for packet in mask_stream.encode(frame):
+            encoder.mux(packet)
         for packet in mask_stream.encode():
             encoder.mux(packet)
-        if frame_count == 0:
-            raise ValueError("Source video contains no frames.")
         completed = True
-        return source_stream.width, source_stream.height, frame_count, float(fps)
+        return width, height, source_frames, float(fps)
     finally:
         if encoder is not None:
             encoder.close()
@@ -235,18 +240,30 @@ def process_job(
     try:
         if mask.suffix.lower() == ".png":
             mask_video_path = mask.with_name("mask_video.mp4")
-            width, height, frame_count, fps = _render_static_mask_video(source, mask, mask_video_path)
+            mask_started = time.monotonic()
+            width, height, source_frames, fps = _render_static_mask_video(source, mask, mask_video_path)
             manifest = json.loads(job_manifest_path.read_text(encoding="utf-8"))
             manifest["input_paths"]["mask_video"] = str(mask_video_path)
             manifest["video_info"] = {
                 "width": width,
                 "height": height,
-                "frames": frame_count,
                 "fps": fps,
-                "duration_seconds": frame_count / fps,
+                **({"frames": source_frames, "duration_seconds": source_frames / fps} if source_frames > 0 else {}),
+            }
+            manifest["mask_video_info"] = {
+                "width": width,
+                "height": height,
+                "frames": 1,
+                "fps": fps,
+                "duration_seconds": 1 / fps,
             }
             job_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
             job_volume.commit()
+            print(
+                f"Encoded static mask video as one frame ({width}x{height}) "
+                f"in {time.monotonic() - mask_started:.2f}s.",
+                flush=True,
+            )
             mask = mask_video_path
         _ensure_models()
         command = [
